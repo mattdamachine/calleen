@@ -11,6 +11,7 @@ use crate::{
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use serde::{de::DeserializeOwned, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use url::Url;
@@ -276,11 +277,13 @@ impl Client {
             request = request.timeout(timeout);
         }
 
-        // Add body if provided
+        // Add body if provided (JSON takes precedence over form data)
         if let Some(body) = body {
             let json = serde_json::to_value(body)
                 .map_err(|e| Error::SerializationFailed(e.to_string()))?;
             request = request.json(&json);
+        } else if let Some(form_data) = &metadata.form_data {
+            request = request.form(form_data);
         }
 
         // Execute the request
@@ -434,6 +437,21 @@ impl Client {
         self.call(metadata, Some(body)).await
     }
 
+    /// Makes a POST request with form-encoded data.
+    ///
+    /// The data is sent as `application/x-www-form-urlencoded`.
+    pub async fn post_form<Res>(
+        &self,
+        path: impl Into<String>,
+        form_data: HashMap<String, String>,
+    ) -> Result<Response<Res>>
+    where
+        Res: DeserializeOwned,
+    {
+        let metadata = RequestMetadata::new(Method::POST, path).with_form_data(form_data);
+        self.call::<(), Res>(metadata, None).await
+    }
+
     /// Makes a PUT request to the specified path with a JSON body.
     pub async fn put<Req, Res>(&self, path: impl Into<String>, body: &Req) -> Result<Response<Res>>
     where
@@ -535,6 +553,18 @@ impl ClientBuilder {
             .map_err(|e| Error::ConfigurationError(format!("Invalid header value: {}", e)))?;
         self.default_headers.insert(name, value);
         Ok(self)
+    }
+
+    /// Sets HTTP Basic Authentication credentials for all requests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the authorization header value is invalid.
+    pub fn basic_auth(self, username: impl AsRef<str>, password: impl AsRef<str>) -> Result<Self> {
+        use base64::Engine;
+        let credentials = format!("{}:{}", username.as_ref(), password.as_ref());
+        let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
+        self.default_header("Authorization", format!("Basic {}", encoded))
     }
 
     /// Sets the retry strategy for failed requests.

@@ -20,6 +20,9 @@ pub struct RequestMetadata {
 
     /// Query parameters for this request.
     pub query_params: HashMap<String, String>,
+
+    /// Form data for this request (application/x-www-form-urlencoded).
+    pub form_data: Option<HashMap<String, String>>,
 }
 
 impl RequestMetadata {
@@ -30,6 +33,7 @@ impl RequestMetadata {
             path: path.into(),
             headers: HeaderMap::new(),
             query_params: HashMap::new(),
+            form_data: None,
         }
     }
 
@@ -61,6 +65,15 @@ impl RequestMetadata {
     /// Adds multiple query parameters to the request.
     pub fn with_query_params(mut self, params: impl IntoIterator<Item = (String, String)>) -> Self {
         self.query_params.extend(params);
+        self
+    }
+
+    /// Sets form data for the request (application/x-www-form-urlencoded).
+    ///
+    /// When form data is set and no JSON body is provided, the request will be
+    /// sent as `application/x-www-form-urlencoded`.
+    pub fn with_form_data(mut self, data: HashMap<String, String>) -> Self {
+        self.form_data = Some(data);
         self
     }
 }

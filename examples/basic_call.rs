@@ -3,7 +3,8 @@
 //! This example shows how to:
 //! - Create a client with basic configuration
 //! - Make GET requests to fetch data
-//! - Make POST requests to create data
+//! - Make POST requests to create data (JSON and form-encoded)
+//! - Use HTTP Basic Authentication
 //! - Access response data and metadata
 //!
 //! Run with: `cargo run --example basic_call`
@@ -71,6 +72,19 @@ async fn main() -> Result<(), Error> {
     println!("Raw response length: {} bytes", response.raw_body.len());
     println!("Content-Type: {:?}", response.header("content-type"));
     println!("Was retried: {}", response.was_retried());
+    println!();
+
+    // === Basic Auth Example ===
+    // let client_with_auth = Client::builder()
+    //     .base_url("https://api.example.com")?
+    //     .basic_auth("username", "password")?
+    //     .build()?;
+
+    // === Form-Encoded POST Example ===
+    // let mut form_data = std::collections::HashMap::new();
+    // form_data.insert("field1".to_string(), "value1".to_string());
+    // form_data.insert("field2".to_string(), "value2".to_string());
+    // let response = client.post_form::<MyResponse>("/submit", form_data).await?;
 
     Ok(())
 }

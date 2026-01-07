@@ -58,6 +58,8 @@
 //! ## Features
 //!
 //! - **Type-safe requests and responses** - Generic over request/response types with automatic JSON serialization
+//! - **HTTP Basic Authentication** - Simple `.basic_auth(user, pass)` on the client builder
+//! - **Form-encoded data** - Support for `application/x-www-form-urlencoded` via `post_form()` or `with_form_data()`
 //! - **Rich error handling** - Comprehensive error types with access to raw responses and HTTP details
 //! - **Flexible retry logic** - Exponential backoff, linear, or custom retry strategies
 //! - **Customizable retry predicates** - Retry on 5xx, timeouts, network errors, or custom conditions

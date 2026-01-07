@@ -695,3 +695,104 @@ async fn test_rate_limit_max_wait_cap() {
     assert!(elapsed >= Duration::from_secs(2));
     assert!(elapsed < Duration::from_secs(4));
 }
+
+#[tokio::test]
+async fn test_basic_auth() {
+    let mock_server = MockServer::start().await;
+
+    let response_data = TestData {
+        id: 1,
+        name: "Test".to_string(),
+    };
+
+    Mock::given(method("GET"))
+        .and(path("/test"))
+        .and(wiremock::matchers::header(
+            "Authorization",
+            "Basic dXNlcjpwYXNz",
+        )) // base64("user:pass")
+        .respond_with(ResponseTemplate::new(200).set_body_json(&response_data))
+        .mount(&mock_server)
+        .await;
+
+    let client = Client::builder()
+        .base_url(mock_server.uri())
+        .unwrap()
+        .basic_auth("user", "pass")
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let response = client.get::<TestData>("/test").await.unwrap();
+    assert_eq!(response.data.id, 1);
+}
+
+#[tokio::test]
+async fn test_post_form() {
+    let mock_server = MockServer::start().await;
+
+    let response_data = TestData {
+        id: 1,
+        name: "Test".to_string(),
+    };
+
+    Mock::given(method("POST"))
+        .and(path("/test"))
+        .and(wiremock::matchers::header(
+            "content-type",
+            "application/x-www-form-urlencoded",
+        ))
+        .and(wiremock::matchers::body_string_contains("key=value"))
+        .and(wiremock::matchers::body_string_contains("name=test"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&response_data))
+        .mount(&mock_server)
+        .await;
+
+    let client = Client::builder()
+        .base_url(mock_server.uri())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let mut form = std::collections::HashMap::new();
+    form.insert("key".to_string(), "value".to_string());
+    form.insert("name".to_string(), "test".to_string());
+
+    let response = client.post_form::<TestData>("/test", form).await.unwrap();
+    assert_eq!(response.data.id, 1);
+}
+
+#[tokio::test]
+async fn test_form_data_via_metadata() {
+    let mock_server = MockServer::start().await;
+
+    let response_data = TestData {
+        id: 1,
+        name: "Test".to_string(),
+    };
+
+    Mock::given(method("POST"))
+        .and(path("/test"))
+        .and(wiremock::matchers::header(
+            "content-type",
+            "application/x-www-form-urlencoded",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&response_data))
+        .mount(&mock_server)
+        .await;
+
+    let client = Client::builder()
+        .base_url(mock_server.uri())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let mut form = std::collections::HashMap::new();
+    form.insert("field".to_string(), "data".to_string());
+
+    let metadata =
+        calleen::metadata::RequestMetadata::new(http::Method::POST, "/test").with_form_data(form);
+
+    let response = client.call::<(), TestData>(metadata, None).await.unwrap();
+    assert_eq!(response.data.id, 1);
+}
