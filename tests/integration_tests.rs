@@ -796,3 +796,249 @@ async fn test_form_data_via_metadata() {
     let response = client.call::<(), TestData>(metadata, None).await.unwrap();
     assert_eq!(response.data.id, 1);
 }
+
+#[tokio::test]
+async fn test_get_bytes_success() {
+    let mock_server = MockServer::start().await;
+
+    // Binary data to return
+    let binary_data = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]; // PNG header
+
+    Mock::given(method("GET"))
+        .and(path("/image.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(binary_data.clone()))
+        .mount(&mock_server)
+        .await;
+
+    let client = Client::builder()
+        .base_url(mock_server.uri())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let response = client.get_bytes("/image.png").await.unwrap();
+
+    assert_eq!(response.data, binary_data);
+    assert_eq!(response.status.as_u16(), 200);
+    assert_eq!(response.attempts, 1);
+    assert!(!response.was_retried());
+}
+
+#[tokio::test]
+async fn test_post_bytes_success() {
+    let mock_server = MockServer::start().await;
+
+    let request_data = TestData {
+        id: 0,
+        name: "Generate".to_string(),
+    };
+
+    // Return some binary data (e.g., a generated PDF)
+    let pdf_header = b"%PDF-1.4";
+
+    Mock::given(method("POST"))
+        .and(path("/generate"))
+        .respond_with(ResponseTemplate::new(201).set_body_bytes(pdf_header.to_vec()))
+        .mount(&mock_server)
+        .await;
+
+    let client = Client::builder()
+        .base_url(mock_server.uri())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let response = client
+        .post_bytes("/generate", &request_data)
+        .await
+        .unwrap();
+
+    assert_eq!(response.data, pdf_header);
+    assert_eq!(response.status.as_u16(), 201);
+}
+
+#[tokio::test]
+async fn test_bytes_response_with_text() {
+    let mock_server = MockServer::start().await;
+
+    let text_data = "Hello, World!";
+
+    Mock::given(method("GET"))
+        .and(path("/text"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(text_data))
+        .mount(&mock_server)
+        .await;
+
+    let client = Client::builder()
+        .base_url(mock_server.uri())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let response = client.get_bytes("/text").await.unwrap();
+
+    assert_eq!(response.data, text_data.as_bytes());
+    assert_eq!(response.raw_body, text_data);
+    assert_eq!(response.status.as_u16(), 200);
+}
+
+#[tokio::test]
+async fn test_bytes_response_http_error() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/notfound"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("File not found"))
+        .mount(&mock_server)
+        .await;
+
+    let client = Client::builder()
+        .base_url(mock_server.uri())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let result = client.get_bytes("/notfound").await;
+
+    match result {
+        Err(Error::HttpError {
+            status,
+            raw_response,
+            ..
+        }) => {
+            assert_eq!(status.as_u16(), 404);
+            assert_eq!(raw_response.as_ref(), "File not found");
+        }
+        _ => panic!("Expected HttpError"),
+    }
+}
+
+#[tokio::test]
+async fn test_bytes_with_retry() {
+    let mock_server = MockServer::start().await;
+
+    let attempt_count = Arc::new(AtomicUsize::new(0));
+    let attempt_count_clone = attempt_count.clone();
+
+    let binary_data = vec![0xFF, 0xD8, 0xFF, 0xE0]; // JPEG header
+    let binary_data_for_closure = binary_data.clone();
+
+    Mock::given(method("GET"))
+        .and(path("/image.jpg"))
+        .respond_with(move |_req: &wiremock::Request| {
+            let count = attempt_count_clone.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                ResponseTemplate::new(500).set_body_string("Server error")
+            } else {
+                ResponseTemplate::new(200).set_body_bytes(binary_data_for_closure.clone())
+            }
+        })
+        .mount(&mock_server)
+        .await;
+
+    let client = Client::builder()
+        .base_url(mock_server.uri())
+        .unwrap()
+        .retry_strategy(RetryStrategy::Linear {
+            delay: Duration::from_millis(10),
+            max_retries: 2,
+        })
+        .build()
+        .unwrap();
+
+    let response = client.get_bytes("/image.jpg").await.unwrap();
+
+    assert_eq!(response.data, binary_data);
+    assert_eq!(response.attempts, 2);
+    assert!(response.was_retried());
+    assert_eq!(attempt_count.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn test_put_bytes() {
+    let mock_server = MockServer::start().await;
+
+    #[derive(Serialize)]
+    struct UploadRequest {
+        name: String,
+        size: usize,
+    }
+
+    let request = UploadRequest {
+        name: "file.bin".to_string(),
+        size: 1024,
+    };
+
+    Mock::given(method("PUT"))
+        .and(path("/files/123"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0x00, 0x01, 0x02]))
+        .mount(&mock_server)
+        .await;
+
+    let client = Client::builder()
+        .base_url(mock_server.uri())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let response = client.put_bytes("/files/123", &request).await.unwrap();
+
+    assert_eq!(response.data, vec![0x00, 0x01, 0x02]);
+    assert_eq!(response.status.as_u16(), 200);
+}
+
+#[tokio::test]
+async fn test_delete_bytes() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("DELETE"))
+        .and(path("/files/123"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(Vec::new()))
+        .mount(&mock_server)
+        .await;
+
+    let client = Client::builder()
+        .base_url(mock_server.uri())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let response = client.delete_bytes("/files/123").await.unwrap();
+
+    assert_eq!(response.data, Vec::<u8>::new());
+    assert_eq!(response.status.as_u16(), 200);
+}
+
+#[tokio::test]
+async fn test_patch_bytes() {
+    let mock_server = MockServer::start().await;
+
+    #[derive(Serialize)]
+    struct PatchRequest {
+        field: String,
+    }
+
+    let request = PatchRequest {
+        field: "updated".to_string(),
+    };
+
+    Mock::given(method("PATCH"))
+        .and(path("/resource/456"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"OK".to_vec()))
+        .mount(&mock_server)
+        .await;
+
+    let client = Client::builder()
+        .base_url(mock_server.uri())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let response = client
+        .patch_bytes("/resource/456", &request)
+        .await
+        .unwrap();
+
+    assert_eq!(response.data, b"OK");
+    assert_eq!(response.status.as_u16(), 200);
+}

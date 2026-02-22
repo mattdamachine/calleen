@@ -233,6 +233,123 @@ impl Client {
         }
     }
 
+    /// Makes an HTTP request and returns the response as raw bytes.
+    ///
+    /// This method is useful when you need to handle non-JSON responses such as:
+    /// - Binary files (images, PDFs, etc.)
+    /// - Plain text responses
+    /// - Custom data formats
+    /// - Streaming data
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use calleen::Client;
+    /// use calleen::metadata::RequestMetadata;
+    /// use http::Method;
+    ///
+    /// # async fn example() -> Result<(), calleen::Error> {
+    /// let client = Client::builder()
+    ///     .base_url("https://api.example.com")?
+    ///     .build()?;
+    ///
+    /// // Download an image
+    /// let metadata = RequestMetadata::new(Method::GET, "/images/logo.png");
+    /// let response = client.call_bytes(metadata, None::<&()>).await?;
+    /// let image_bytes = response.data;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn call_bytes<Req>(
+        &self,
+        metadata: RequestMetadata,
+        body: Option<&Req>,
+    ) -> Result<Response<Vec<u8>>>
+    where
+        Req: Serialize,
+    {
+        let start_time = Instant::now();
+        let mut attempt = 0;
+        let mut last_error = None;
+
+        loop {
+            attempt += 1;
+
+            let result = match self.execute_request(&metadata, body, attempt).await {
+                Ok(response) => {
+                    let latency = start_time.elapsed();
+                    self.parse_bytes_response(response, latency, attempt).await
+                }
+                Err(e) => Err(e),
+            };
+
+            match result {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        attempt = attempt,
+                        method = %metadata.method,
+                        path = %metadata.path,
+                        "Request failed"
+                    );
+
+                    // Check if we should retry
+                    if !self.inner.retry_predicate.should_retry(&e, attempt) {
+                        return Err(e);
+                    }
+
+                    // Determine retry delay - prefer rate limit info if available
+                    // but still respect max_retries
+                    let delay = match self.inner.retry_strategy.delay_for_attempt(attempt) {
+                        Some(normal_delay) => {
+                            // We have retries remaining - check if rate limit delay should override
+                            if self.inner.rate_limit_config.enabled {
+                                if let Some(rate_limit_delay) =
+                                    e.rate_limit_delay(self.inner.rate_limit_config.max_wait)
+                                {
+                                    tracing::info!(
+                                        rate_limit_delay_ms = rate_limit_delay.as_millis(),
+                                        attempt = attempt,
+                                        max_wait_secs =
+                                            self.inner.rate_limit_config.max_wait.as_secs(),
+                                        "Rate limited - waiting before retry"
+                                    );
+                                    Some(rate_limit_delay)
+                                } else {
+                                    Some(normal_delay)
+                                }
+                            } else {
+                                Some(normal_delay)
+                            }
+                        }
+                        None => None, // No retries remaining
+                    };
+
+                    // Check if we have more retries available
+                    if let Some(delay) = delay {
+                        if e.rate_limit_info().is_none() {
+                            tracing::info!(
+                                delay_ms = delay.as_millis(),
+                                attempt = attempt,
+                                "Retrying request after delay"
+                            );
+                        }
+
+                        tokio::time::sleep(delay).await;
+                        last_error = Some(e);
+                    } else {
+                        // No more retries
+                        return Err(Error::MaxRetriesExceeded {
+                            attempts: attempt,
+                            last_error: Box::new(last_error.unwrap_or(e)),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     /// Executes a single request attempt.
     async fn execute_request<Req>(
         &self,
@@ -374,6 +491,75 @@ impl Client {
         }
     }
 
+    /// Parses the response as raw bytes and returns a `Response<Vec<u8>>`.
+    async fn parse_bytes_response(
+        &self,
+        response: reqwest::Response,
+        latency: Duration,
+        attempts: usize,
+    ) -> Result<Response<Vec<u8>>> {
+        let status = response.status();
+        let headers = response.headers().clone();
+
+        tracing::info!(
+            status = status.as_u16(),
+            latency_ms = latency.as_millis(),
+            attempts = attempts,
+            "Received HTTP response (bytes)"
+        );
+
+        // Check for HTTP errors (non-2xx)
+        if !status.is_success() {
+            let raw_response = response.text().await.unwrap_or_default();
+
+            // Parse rate limit info if enabled
+            let rate_limit_info = if self.inner.rate_limit_config.enabled {
+                let info = crate::rate_limit::RateLimitInfo::from_headers(&headers);
+                if info.is_rate_limited() {
+                    Some(info)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if status.is_client_error() {
+                tracing::error!(
+                    status = status.as_u16(),
+                    response = %raw_response,
+                    "Client error (4xx)"
+                );
+            } else if status.is_server_error() {
+                tracing::warn!(
+                    status = status.as_u16(),
+                    response = %raw_response,
+                    "Server error (5xx)"
+                );
+            }
+
+            return Err(Error::HttpError {
+                status,
+                raw_response: raw_response.into_boxed_str(),
+                headers: Box::new(headers),
+                rate_limit_info,
+            });
+        }
+
+        // Get raw response bytes
+        let bytes = response.bytes().await?;
+        let data = bytes.to_vec();
+
+        // For the raw_body field in Response, we'll store a string representation
+        // (either UTF-8 if valid, or a hex representation for binary data)
+        let raw_body = String::from_utf8(data.clone())
+            .unwrap_or_else(|_| format!("<binary data: {} bytes>", data.len()));
+
+        Ok(Response::new(
+            data, raw_body, status, headers, latency, attempts,
+        ))
+    }
+
     /// Makes a GET request to the specified path.
     ///
     /// # Examples
@@ -483,6 +669,171 @@ impl Client {
     {
         let metadata = RequestMetadata::new(Method::PATCH, path);
         self.call(metadata, Some(body)).await
+    }
+
+    /// Makes a GET request and returns the response as raw bytes.
+    ///
+    /// This is useful for downloading binary files, images, or any non-JSON content.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use calleen::Client;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = Client::builder()
+    ///     .base_url("https://api.example.com")?
+    ///     .build()?;
+    ///
+    /// // Download an image
+    /// let response = client.get_bytes("/images/logo.png").await?;
+    /// let image_data = response.data;
+    /// std::fs::write("logo.png", image_data)?;
+    ///
+    /// // Download a PDF
+    /// let pdf_response = client.get_bytes("/documents/report.pdf").await?;
+    /// println!("Downloaded {} bytes", pdf_response.data.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_bytes(&self, path: impl Into<String>) -> Result<Response<Vec<u8>>> {
+        let metadata = RequestMetadata::new(Method::GET, path);
+        self.call_bytes::<()>(metadata, None).await
+    }
+
+    /// Makes a POST request with a JSON body and returns the response as raw bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use calleen::Client;
+    /// use serde::Serialize;
+    ///
+    /// #[derive(Serialize)]
+    /// struct GenerateRequest {
+    ///     format: String,
+    ///     data: String,
+    /// }
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = Client::builder()
+    ///     .base_url("https://api.example.com")?
+    ///     .build()?;
+    ///
+    /// let request = GenerateRequest {
+    ///     format: "pdf".to_string(),
+    ///     data: "Hello World".to_string(),
+    /// };
+    ///
+    /// // Generate a PDF and get raw bytes
+    /// let response = client.post_bytes("/generate", &request).await?;
+    /// std::fs::write("output.pdf", response.data)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn post_bytes<Req>(
+        &self,
+        path: impl Into<String>,
+        body: &Req,
+    ) -> Result<Response<Vec<u8>>>
+    where
+        Req: Serialize,
+    {
+        let metadata = RequestMetadata::new(Method::POST, path);
+        self.call_bytes(metadata, Some(body)).await
+    }
+
+    /// Makes a PUT request with a JSON body and returns the response as raw bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use calleen::Client;
+    /// use serde::Serialize;
+    ///
+    /// #[derive(Serialize)]
+    /// struct UpdateData { content: Vec<u8> }
+    ///
+    /// # async fn example() -> Result<(), calleen::Error> {
+    /// let client = Client::builder()
+    ///     .base_url("https://api.example.com")?
+    ///     .build()?;
+    ///
+    /// let data = UpdateData { content: vec![0x01, 0x02, 0x03] };
+    /// let response = client.put_bytes("/files/123", &data).await?;
+    /// println!("Updated file, server returned {} bytes", response.data.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn put_bytes<Req>(
+        &self,
+        path: impl Into<String>,
+        body: &Req,
+    ) -> Result<Response<Vec<u8>>>
+    where
+        Req: Serialize,
+    {
+        let metadata = RequestMetadata::new(Method::PUT, path);
+        self.call_bytes(metadata, Some(body)).await
+    }
+
+    /// Makes a DELETE request and returns the response as raw bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use calleen::Client;
+    ///
+    /// # async fn example() -> Result<(), calleen::Error> {
+    /// let client = Client::builder()
+    ///     .base_url("https://api.example.com")?
+    ///     .build()?;
+    ///
+    /// let response = client.delete_bytes("/files/123").await?;
+    /// // Some APIs might return the deleted file content
+    /// if !response.data.is_empty() {
+    ///     println!("Deleted file was {} bytes", response.data.len());
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn delete_bytes(&self, path: impl Into<String>) -> Result<Response<Vec<u8>>> {
+        let metadata = RequestMetadata::new(Method::DELETE, path);
+        self.call_bytes::<()>(metadata, None).await
+    }
+
+    /// Makes a PATCH request with a JSON body and returns the response as raw bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use calleen::Client;
+    /// use serde::Serialize;
+    ///
+    /// #[derive(Serialize)]
+    /// struct PatchData { partial_update: String }
+    ///
+    /// # async fn example() -> Result<(), calleen::Error> {
+    /// let client = Client::builder()
+    ///     .base_url("https://api.example.com")?
+    ///     .build()?;
+    ///
+    /// let patch = PatchData { partial_update: "new value".to_string() };
+    /// let response = client.patch_bytes("/resources/123", &patch).await?;
+    /// println!("Patched resource, got {} bytes back", response.data.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn patch_bytes<Req>(
+        &self,
+        path: impl Into<String>,
+        body: &Req,
+    ) -> Result<Response<Vec<u8>>>
+    where
+        Req: Serialize,
+    {
+        let metadata = RequestMetadata::new(Method::PATCH, path);
+        self.call_bytes(metadata, Some(body)).await
     }
 }
 
