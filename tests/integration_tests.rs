@@ -848,10 +848,7 @@ async fn test_post_bytes_success() {
         .build()
         .unwrap();
 
-    let response = client
-        .post_bytes("/generate", &request_data)
-        .await
-        .unwrap();
+    let response = client.post_bytes("/generate", &request_data).await.unwrap();
 
     assert_eq!(response.data, pdf_header);
     assert_eq!(response.status.as_u16(), 201);
@@ -1034,10 +1031,7 @@ async fn test_patch_bytes() {
         .build()
         .unwrap();
 
-    let response = client
-        .patch_bytes("/resource/456", &request)
-        .await
-        .unwrap();
+    let response = client.patch_bytes("/resource/456", &request).await.unwrap();
 
     assert_eq!(response.data, b"OK");
     assert_eq!(response.status.as_u16(), 200);
