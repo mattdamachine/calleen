@@ -239,7 +239,6 @@ impl Client {
     /// - Binary files (images, PDFs, etc.)
     /// - Plain text responses
     /// - Custom data formats
-    /// - Streaming data
     ///
     /// # Examples
     ///
