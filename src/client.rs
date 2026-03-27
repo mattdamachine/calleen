@@ -142,6 +142,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn call<Req, Res>(
         &self,
         metadata: RequestMetadata,
@@ -169,6 +170,7 @@ impl Client {
             match result {
                 Ok(response) => return Ok(response),
                 Err(e) => {
+                    #[cfg(feature = "tracing")]
                     tracing::warn!(
                         error = %e,
                         attempt = attempt,
@@ -191,6 +193,7 @@ impl Client {
                                 if let Some(rate_limit_delay) =
                                     e.rate_limit_delay(self.inner.rate_limit_config.max_wait)
                                 {
+                                    #[cfg(feature = "tracing")]
                                     tracing::info!(
                                         rate_limit_delay_ms = rate_limit_delay.as_millis(),
                                         attempt = attempt,
@@ -211,6 +214,7 @@ impl Client {
 
                     // Check if we have more retries available
                     if let Some(delay) = delay {
+                        #[cfg(feature = "tracing")]
                         if e.rate_limit_info().is_none() {
                             tracing::info!(
                                 delay_ms = delay.as_millis(),
@@ -238,7 +242,7 @@ impl Client {
         &self,
         metadata: &RequestMetadata,
         body: Option<&Req>,
-        attempt: usize,
+        _attempt: usize,
     ) -> Result<reqwest::Response>
     where
         Req: Serialize,
@@ -252,10 +256,11 @@ impl Client {
             url.query_pairs_mut().append_pair(key, value);
         }
 
+        #[cfg(feature = "tracing")]
         tracing::debug!(
             method = %metadata.method,
             url = %url,
-            attempt = attempt,
+            attempt = _attempt,
             "Executing HTTP request"
         );
 
@@ -305,6 +310,7 @@ impl Client {
         let status = response.status();
         let headers = response.headers().clone();
 
+        #[cfg(feature = "tracing")]
         tracing::info!(
             status = status.as_u16(),
             latency_ms = latency.as_millis(),
@@ -328,6 +334,7 @@ impl Client {
                 None
             };
 
+            #[cfg(feature = "tracing")]
             if status.is_client_error() {
                 tracing::error!(
                     status = status.as_u16(),
@@ -359,6 +366,7 @@ impl Client {
                 data, raw_body, status, headers, latency, attempts,
             )),
             Err(e) => {
+                #[cfg(feature = "tracing")]
                 tracing::error!(
                     error = %e,
                     raw_response = %raw_body,
@@ -395,6 +403,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn get<Res>(&self, path: impl Into<String>) -> Result<Response<Res>>
     where
         Res: DeserializeOwned,
@@ -428,6 +437,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn post<Req, Res>(&self, path: impl Into<String>, body: &Req) -> Result<Response<Res>>
     where
         Req: Serialize,
@@ -440,6 +450,7 @@ impl Client {
     /// Makes a POST request with form-encoded data.
     ///
     /// The data is sent as `application/x-www-form-urlencoded`.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn post_form<Res>(
         &self,
         path: impl Into<String>,
@@ -453,6 +464,7 @@ impl Client {
     }
 
     /// Makes a PUT request to the specified path with a JSON body.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn put<Req, Res>(&self, path: impl Into<String>, body: &Req) -> Result<Response<Res>>
     where
         Req: Serialize,
@@ -463,6 +475,7 @@ impl Client {
     }
 
     /// Makes a DELETE request to the specified path.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn delete<Res>(&self, path: impl Into<String>) -> Result<Response<Res>>
     where
         Res: DeserializeOwned,
@@ -472,6 +485,7 @@ impl Client {
     }
 
     /// Makes a PATCH request to the specified path with a JSON body.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn patch<Req, Res>(
         &self,
         path: impl Into<String>,
