@@ -206,7 +206,7 @@ impl Client {
         .await
     }
 
-    /// Shared retry loop used by [`call`] and [`call_bytes`].
+    /// Shared retry loop used by [`Self::call`] and [`Self::call_bytes`].
     ///
     /// Accepts a `parser` closure that converts a raw `reqwest::Response` into
     /// the desired `Response<T>`, allowing the retry/backoff logic to live in
