@@ -467,6 +467,7 @@ impl Client {
         let status = response.status();
         let headers = response.headers().clone();
 
+        #[cfg(feature = "tracing")]
         tracing::info!(
             status = status.as_u16(),
             latency_ms = latency.as_millis(),
@@ -490,6 +491,7 @@ impl Client {
                 None
             };
 
+            #[cfg(feature = "tracing")]
             if status.is_client_error() {
                 tracing::error!(
                     status = status.as_u16(),
