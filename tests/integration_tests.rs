@@ -594,14 +594,9 @@ async fn test_rate_limit_with_x_ratelimit_reset() {
 
     assert_eq!(response.data.id, 1);
     assert_eq!(response.attempts, 2);
-    // Should have waited approximately 1 second for rate limit
-    // Note: Unix timestamps are in whole seconds, so nanoseconds are truncated,
-    // which can reduce the delay. Allow tolerance for this and processing time.
-    assert!(
-        elapsed >= Duration::from_millis(100),
-        "Expected at least 100ms, got {:?}",
-        elapsed
-    );
+    // Should have waited for the rate limit reset. The reset timestamp is truncated
+    // to whole seconds, so the actual delay can be anywhere from ~0ms (if we're at
+    // the very end of the current second) to ~1s. Just verify it completed quickly.
     assert!(
         elapsed < Duration::from_secs(2),
         "Expected less than 2s, got {:?}",
