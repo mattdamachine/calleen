@@ -23,7 +23,7 @@ This library addresses these three concerns primarily.
 
 The standard use case - making requests to JSON APIs with automatic serialization/deserialization:
 
-```rust
+```rust,no_run
 use calleen::Client;
 use serde::{Deserialize, Serialize};
 
@@ -40,35 +40,29 @@ struct User {
     email: String,
 }
 
-let client = Client::builder()
-    .base_url("https://api.example.com")?
-    .build()?;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::builder()
+        .base_url("https://api.example.com")?
+        .build()?;
 
-let request = CreateUser {
-    name: "Alice".to_string(),
-    email: "alice@example.com".to_string(),
-};
+    let request = CreateUser {
+        name: "Alice".to_string(),
+        email: "alice@example.com".to_string(),
+    };
 
-let response = client.post::<CreateUser, User>("/users", &request).await?;
-println!("Created user with ID: {}", response.data.id);
+    let response = client.post::<CreateUser, User>("/users", &request).await?;
+    println!("Created user with ID: {}", response.data.id);
+    Ok(())
+}
 ```
 
 ### Raw Bytes Responses
 
 For non-JSON responses like binary files, images, or custom data formats, use the `*_bytes` methods:
 
-```rust
+```rust,no_run
 use calleen::Client;
-
-let client = Client::builder()
-    .base_url("https://api.example.com")?
-    .build()?;
-
-// Download an image
-let response = client.get_bytes("/images/logo.png").await?;
-std::fs::write("logo.png", response.data)?;
-
-// Generate a PDF with JSON request, binary response
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -77,13 +71,26 @@ struct GeneratePdfRequest {
     data: serde_json::Value,
 }
 
-let request = GeneratePdfRequest {
-    template: "invoice".to_string(),
-    data: serde_json::json!({"invoice_id": 12345}),
-};
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::builder()
+        .base_url("https://api.example.com")?
+        .build()?;
 
-let response = client.post_bytes("/generate-pdf", &request).await?;
-std::fs::write("invoice.pdf", response.data)?;
+    // Download an image
+    let response = client.get_bytes("/images/logo.png").await?;
+    std::fs::write("logo.png", response.data)?;
+
+    // Generate a PDF with JSON request, binary response
+    let request = GeneratePdfRequest {
+        template: "invoice".to_string(),
+        data: serde_json::json!({"invoice_id": 12345}),
+    };
+
+    let response = client.post_bytes("/generate-pdf", &request).await?;
+    std::fs::write("invoice.pdf", response.data)?;
+    Ok(())
+}
 ```
 
 All bytes methods (`get_bytes`, `post_bytes`, `put_bytes`, `delete_bytes`, `patch_bytes`) preserve the same retry logic, error handling, and metadata tracking as their JSON counterparts.

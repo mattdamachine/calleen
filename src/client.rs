@@ -149,88 +149,14 @@ impl Client {
     ) -> Result<Response<Res>>
     where
         Req: Serialize,
-        Res: DeserializeOwned,
+        Res: DeserializeOwned + 'static,
     {
-        let start_time = Instant::now();
-        let mut attempt = 0;
-        let mut last_error = None;
-
-        loop {
-            attempt += 1;
-
-            let result = match self.execute_request(&metadata, body, attempt).await {
-                Ok(response) => {
-                    let latency = start_time.elapsed();
-                    self.parse_response(response, latency, attempt).await
-                }
-                Err(e) => Err(e),
-            };
-
-            match result {
-                Ok(response) => return Ok(response),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        attempt = attempt,
-                        method = %metadata.method,
-                        path = %metadata.path,
-                        "Request failed"
-                    );
-
-                    // Check if we should retry
-                    if !self.inner.retry_predicate.should_retry(&e, attempt) {
-                        return Err(e);
-                    }
-
-                    // Determine retry delay - prefer rate limit info if available
-                    // but still respect max_retries
-                    let delay = match self.inner.retry_strategy.delay_for_attempt(attempt) {
-                        Some(normal_delay) => {
-                            // We have retries remaining - check if rate limit delay should override
-                            if self.inner.rate_limit_config.enabled {
-                                if let Some(rate_limit_delay) =
-                                    e.rate_limit_delay(self.inner.rate_limit_config.max_wait)
-                                {
-                                    tracing::info!(
-                                        rate_limit_delay_ms = rate_limit_delay.as_millis(),
-                                        attempt = attempt,
-                                        max_wait_secs =
-                                            self.inner.rate_limit_config.max_wait.as_secs(),
-                                        "Rate limited - waiting before retry"
-                                    );
-                                    Some(rate_limit_delay)
-                                } else {
-                                    Some(normal_delay)
-                                }
-                            } else {
-                                Some(normal_delay)
-                            }
-                        }
-                        None => None, // No retries remaining
-                    };
-
-                    // Check if we have more retries available
-                    if let Some(delay) = delay {
-                        if e.rate_limit_info().is_none() {
-                            tracing::info!(
-                                delay_ms = delay.as_millis(),
-                                attempt = attempt,
-                                "Retrying request after delay"
-                            );
-                        }
-
-                        tokio::time::sleep(delay).await;
-                        last_error = Some(e);
-                    } else {
-                        // No more retries
-                        return Err(Error::MaxRetriesExceeded {
-                            attempts: attempt,
-                            last_error: Box::new(last_error.unwrap_or(e)),
-                        });
-                    }
-                }
-            }
-        }
+        let client = self.clone();
+        self.retry_loop(&metadata, body, move |response, latency, attempt| {
+            let client = client.clone();
+            Box::pin(async move { client.parse_response(response, latency, attempt).await })
+        })
+        .await
     }
 
     /// Makes an HTTP request and returns the response as raw bytes.
@@ -267,6 +193,39 @@ impl Client {
     where
         Req: Serialize,
     {
+        let client = self.clone();
+        self.retry_loop(&metadata, body, move |response, latency, attempt| {
+            let client = client.clone();
+            Box::pin(async move {
+                client
+                    .parse_bytes_response(response, latency, attempt)
+                    .await
+            })
+        })
+        .await
+    }
+
+    /// Shared retry loop used by [`call`] and [`call_bytes`].
+    ///
+    /// Accepts a `parser` closure that converts a raw `reqwest::Response` into
+    /// the desired `Response<T>`, allowing the retry/backoff logic to live in
+    /// one place.
+    async fn retry_loop<Req, T>(
+        &self,
+        metadata: &RequestMetadata,
+        body: Option<&Req>,
+        parser: impl Fn(
+            reqwest::Response,
+            Duration,
+            usize,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Response<T>>> + Send + 'static>,
+        >,
+    ) -> Result<Response<T>>
+    where
+        Req: Serialize,
+        T: 'static,
+    {
         let start_time = Instant::now();
         let mut attempt = 0;
         let mut last_error = None;
@@ -274,10 +233,10 @@ impl Client {
         loop {
             attempt += 1;
 
-            let result = match self.execute_request(&metadata, body, attempt).await {
+            let result = match self.execute_request(metadata, body, attempt).await {
                 Ok(response) => {
                     let latency = start_time.elapsed();
-                    self.parse_bytes_response(response, latency, attempt).await
+                    parser(response, latency, attempt).await
                 }
                 Err(e) => Err(e),
             };
@@ -550,9 +509,11 @@ impl Client {
         let data = bytes.to_vec();
 
         // For the raw_body field in Response, we'll store a string representation
-        // (either UTF-8 if valid, or a hex representation for binary data)
-        let raw_body = String::from_utf8(data.clone())
-            .unwrap_or_else(|_| format!("<binary data: {} bytes>", data.len()));
+        // (either UTF-8 if valid, or a placeholder indicating binary data and its length)
+        let raw_body = match std::str::from_utf8(&data) {
+            Ok(text) => text.to_owned(),
+            Err(_) => format!("<binary data: {} bytes>", data.len()),
+        };
 
         Ok(Response::new(
             data, raw_body, status, headers, latency, attempts,
@@ -582,7 +543,7 @@ impl Client {
     /// ```
     pub async fn get<Res>(&self, path: impl Into<String>) -> Result<Response<Res>>
     where
-        Res: DeserializeOwned,
+        Res: DeserializeOwned + 'static,
     {
         let metadata = RequestMetadata::new(Method::GET, path);
         self.call::<(), Res>(metadata, None).await
@@ -616,7 +577,7 @@ impl Client {
     pub async fn post<Req, Res>(&self, path: impl Into<String>, body: &Req) -> Result<Response<Res>>
     where
         Req: Serialize,
-        Res: DeserializeOwned,
+        Res: DeserializeOwned + 'static,
     {
         let metadata = RequestMetadata::new(Method::POST, path);
         self.call(metadata, Some(body)).await
@@ -631,7 +592,7 @@ impl Client {
         form_data: HashMap<String, String>,
     ) -> Result<Response<Res>>
     where
-        Res: DeserializeOwned,
+        Res: DeserializeOwned + 'static,
     {
         let metadata = RequestMetadata::new(Method::POST, path).with_form_data(form_data);
         self.call::<(), Res>(metadata, None).await
@@ -641,7 +602,7 @@ impl Client {
     pub async fn put<Req, Res>(&self, path: impl Into<String>, body: &Req) -> Result<Response<Res>>
     where
         Req: Serialize,
-        Res: DeserializeOwned,
+        Res: DeserializeOwned + 'static,
     {
         let metadata = RequestMetadata::new(Method::PUT, path);
         self.call(metadata, Some(body)).await
@@ -650,7 +611,7 @@ impl Client {
     /// Makes a DELETE request to the specified path.
     pub async fn delete<Res>(&self, path: impl Into<String>) -> Result<Response<Res>>
     where
-        Res: DeserializeOwned,
+        Res: DeserializeOwned + 'static,
     {
         let metadata = RequestMetadata::new(Method::DELETE, path);
         self.call::<(), Res>(metadata, None).await
@@ -664,7 +625,7 @@ impl Client {
     ) -> Result<Response<Res>>
     where
         Req: Serialize,
-        Res: DeserializeOwned,
+        Res: DeserializeOwned + 'static,
     {
         let metadata = RequestMetadata::new(Method::PATCH, path);
         self.call(metadata, Some(body)).await
